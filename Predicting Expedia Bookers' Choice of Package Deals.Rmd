@@ -1,0 +1,607 @@
+---
+title: \Large\textbf{Predicting Expedia Bookers' Choices of Package Deals}
+subtitle: "UCLA Stats 140SL Final Report"
+author: "Xiaojing Zhu, Haorui Zhang, Chen Wen, Xinyan Li, Yufei Den"
+date: "Fall 2017"
+header-includes:
+- \usepackage{enumitem}
+- \usepackage{graphicx}
+- \usepackage{gb4e}
+- \noautomath
+abstract: |
+    In this project, we used the data from Expedia’s hotel line of business. We answered the research question - "how does each factor contribute to a booker's choice of pacakge deals?" - by building a logistic classification model. We repeatedly sampled the training and testing data sets and found that our model yielded consistent prediction results. Our model suggests that bookers from certain countries, such as Germany and Switzerland, and those preferring high-end hotels tend to choose package deals. On the other hand, last-minute bookers and mobile app bookers are discouraged to choose package deals. 
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+---
+
+```{r packages, include=FALSE}
+library(data.table)
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(e1071)
+library(pander)
+library(knitr)
+```
+
+```{r importing data, include=FALSE}
+mydata <- data.table::fread("/Users/emma/Desktop/Stats 140SL/Expedia/data.txt")
+```
+
+\section{Research Question}
+
+```{r subsetting data, include=FALSE}
+# is_booking: 1 if a booking, 0 if a click.
+# is_package: 1 if the click/booking was generated as a part of a package search (i.e. a hotel combined with a flight and/or car rental), 0 otherwise.
+Book <- mydata %>% filter(is_booking == 1) #958896 observations 
+Book <- na.omit(Book) #958771 observations 
+
+# Among users who actually booked the hotels, only 8.97% travellers choose packages.
+percent <- paste(round(100 * sum(Book$is_package) / nrow(Book), 2), "%", sep = "")
+# We decided to treat is_package as the response variable.
+```
+
+Aimed at studying booking behaviors of Expedia users, we subset the data by filtering out *is_booking* = 1 to get information from bookers only. This allows us to avoid uncertainties caused by random and repetitive clicks by the browsers. We noticed that only `r percent` of the bookers would choose a package deal - i.e., booking a hotel combined with a flight and/or car rental. Therefore, we found it worthwhile to further explore the binary variable *is_package*, by which Expedia would be able to identify potential package buyers and thus to target specific users. 
+  
+We raised our reserach question as follows:
+
+\begin{center}
+\textbf{How does each factor contribute to Expedia bookers' choices of package deals?}
+\end{center}
+
+\section{Data Exploration}
+
+```{r selected predictors, include=FALSE}
+# The following variables were selected as predictors because their grouped means of choosing package deals differed by levels of the variable.
+
+# X1. user_location_country
+Book %>% group_by(user_location_country) %>% summarise(count = n(), prop_package = mean(is_package)) %>% arrange(desc(prop_package)) 
+
+# X2. orig_destination_distance
+Book$orig_destination_distance = as.numeric(Book$orig_destination_distance)
+# NAs introduced by coercion
+Book <- na.omit(Book)
+# We now have 768486 observations in the Book data set
+Book %>% group_by(is_package) %>% summarise(mean(orig_destination_distance))
+
+# X3. is_mobile
+Book %>% group_by(is_mobile) %>% summarise(mean(is_package))
+
+# X4. prop_is_branded 
+Book %>% group_by(prop_is_branded) %>% summarise(prop_package = mean(is_package))
+
+# X5. prop_starrating 
+Book %>% group_by(prop_starrating) %>% summarise(count = n(), prop_package = mean(is_package)) %>% arrange(desc(prop_package))
+
+# X6. hist_price_band
+Book %>% group_by(hist_price_band) %>% summarise(prop_package = mean(is_package)) %>% arrange(desc(prop_package))
+
+# X7. popularity_band
+Book %>% group_by(popularity_band) %>% summarise(prop_package = mean(is_package)) %>% arrange(desc(prop_package))
+```
+
+```{r dropped predictors, include=FALSE}
+# The following variables were excluded from predictors because their group means of choosing package deals were similar among different levels.
+
+# srch_children_cnt [dropped]
+Book %>% group_by(srch_children_cnt) %>% summarise(prop_package = mean(is_package))
+
+# srch_adults_cnt [dropped]
+Book %>% group_by(srch_adults_cnt) %>% summarise(prop_package = mean(is_package)) 
+# 50% of bookers traveling with 0 adults chose package deals
+# dropped because adult count = 0 did not make sense
+
+# srch_rm_cnt [dropped]
+Book %>% group_by(srch_rm_cnt) %>% summarise(prop_package = mean(is_package))
+
+# hotel_country [dropped]
+Book %>% group_by(hotel_country) %>% summarise(count = n(), prop_package = mean(is_package)) %>% arrange(desc(prop_package))
+# We tried to include this variable in our model, but we dropped it not only because it takes a long time to run the model, but also because none of the levels was significant. 
+
+# distance_band [dropped]
+Book %>% group_by(distance_band) %>% summarise(prop_package = mean(is_package))
+```
+
+```{r creating new predictors, include=FALSE}
+# X8. Create a new variable is_ahead
+# date_time: Timestamp time, date, year in user's local time
+# srch_ci: Check-in date specified in the customer search
+Book$date_time <- as.Date(Book$date_time)
+Book$srch_ci <- as.Date(Book$srch_ci)
+Book$plantime <- Book$srch_ci - Book$date_time
+Book <- Book %>% filter(plantime >= 0)
+# We now have 768396 in the Book data set
+quantile(Book$plantime)
+median <- as.numeric(quantile(Book$plantime)[3]) 
+
+Book$is_ahead[Book$plantime <= median] <- 1
+Book$is_ahead[Book$plantime > median] <- 0
+
+Book %>% group_by(is_ahead) %>% summarise(prop_package = mean(is_package))
+
+# X9. Create a new varaible is_domestic
+Int_Book <- Book[, c(3, 19)]
+a <- rep(5, nrow(Book))
+for (i in 1:nrow(Book)) {
+  if (Int_Book$user_location_country[i] == Int_Book$hotel_country[i]) {a[i] <- 1}
+  else {a[i] <- 0}
+}
+
+Book$is_domestic <- a
+summary(Book$is_domestic)
+Book %>% group_by(is_domestic) %>% summarise(prop_package = mean(is_package))
+```
+
+After choosing *is_package* as the response variable, we selected our predictors based on scrutinizing the basic statistics of each variable. If the proportion of bookers choosing package deals differed by levels of a variable, then the variable would be selected as a predictor. 
+
+The predictors selected were *user_location_country*, *orig_destination_distance*, *is_mobile*, *prop_is_branded*, *prop_starrating*, *hist_price_band*, and *popularity_band*. 
+
+Moreover, we created two new variables, ***is_ahead*** 
+and ***is_domestic***. 
+We calculated the time difference in days between the booking date and the check-in date, and sorted those who booked at least 14 days ahead of their travel as early birds (*is_ahead* = 1). Then, since we believed that whether a travel is domestic or international would also affect the booker’s choice, we checked if the country the user is located in and the country the hotel is located in are the same to create a new variable called *is_domestic* and also included it in our model.
+
+The summary statsitics describing the relationships between each predictor and the response are shown below.
+
+**Predictor 1, user_location_country**
+
+*user_location_country* tells us where the customer is located at the time of interaction with Expedia sites. The table below
+shows the top 5 countries with users favoring package deals. 26.47% of users from Germany chose package deals, followed by Switzerland, Georgia, Canada and the United States. 
+
+```{r user_location_country, include=FALSE}
+pander(Book %>% group_by(user_location_country) %>% summarise(count = n(), prop_package = mean(is_package)) %>% arrange(desc(prop_package)) %>% top_n(5))
+```
+
+--------------------------------------------------
+  user_location_country     count    prop_package 
+-------------------------- -------- --------------
+         GERMANY            21078       0.2647    
+
+       SWITZERLAND           1595       0.2006    
+
+         GEORGIA             116        0.1552    
+
+          CANADA            92885       0.1035    
+
+ UNITED STATES OF AMERICA   645939     0.08097    
+--------------------------------------------------
+
+**Predictor 2, orig_destination_distance**
+
+*orig_destination_distance* is the physical distance between a hotel and a customer at the time of search in miles. On average, Bookers with package deals traveled 361 miles farther than bookers without package deals. 
+    
+```{r orig_destination_distance, message = FALSE, warning= FALSE, echo=FALSE}
+pander(Book %>% group_by(is_package) %>% summarise(mean_distance = mean(orig_destination_distance)))
+```
+
+**Predictor 3, is_mobile**
+
+*is_mobile* = 1 if the user was connected from a mobile device; otherwise it is 0. Only 4.082% of users booking with mobile devices chose packages. The proportion is much lower than users booking with non-mobile devices. 
+
+```{r is_mobile, message = FALSE, warning= FALSE, echo=FALSE}
+pander(Book %>% group_by(is_mobile) %>% summarise(prop_package = mean(is_package)))
+```
+
+**Predictor 4, prop_is_branded**
+
+*prop_is_branded* = 1 if the hotel is part of a major hotel chain, such as Hilton, Marriott and Sheraton; otherwise it is 0. 
+
+```{r prop_is_branded, message = FALSE, warning= FALSE, echo=FALSE}
+pander(Book %>% group_by(prop_is_branded) %>% summarise(prop_package = mean(is_package)))
+```
+
+**Predictor 5, prop_starrating**
+
+*prop_starrating* is the star rating of the hotel from 1 to 5. A 0 indicates the property has no stars, the star rating is not known or cannot be publicized. It appears that users booking higher the star rating hotels chose package deals more often. 
+
+```{r prop_starrating, message = FALSE, warning= FALSE, echo=FALSE}
+pander(Book %>% group_by(prop_starrating) %>% summarise(count = n(), prop_package = mean(is_package)) %>% arrange(desc(prop_package)))
+```
+
+**Predictor 6, hist_price_band**
+
+*hist_price_band* is the banded historical purchase price of a hotel relative to other hotels in the same destination (VL = very low, L = low, M = medium, H = high, VH = very high). Users booking more expensive hotels chose package deals more often. 
+```{r hist_price_band, message = FALSE, warning= FALSE, echo=FALSE}
+pander(Book %>% group_by(hist_price_band) %>% summarise(prop_package = mean(is_package)) %>% arrange(desc(prop_package)))
+```
+
+**Predictor 7, popularity_band**
+
+*popularity_band* is banded hotel popularity relative to other hotels in the same destination - i.e. how often it is booked on Expedia (VL = very low, L = low, M = medium, H = high, VH = very high). Users booking more popular hotels chose package deals more often.
+
+```{r popularity_band, message = FALSE, warning= FALSE, echo=FALSE}
+pander(Book %>% group_by(popularity_band) %>% summarise(prop_package = mean(is_package)) %>% arrange(desc(prop_package)))
+```
+
+**Predictor 8, is_ahead**
+
+*is_ahead* is the new variable we created. Bookers who did not plan ahead about their travels chose package deals more frequently. 
+
+```{r is_ahead, message = FALSE, warning= FALSE, echo=FALSE}
+pander(Book %>% group_by(is_ahead) %>% summarise(prop_package = mean(is_package)))
+```
+
+**Predictor 9, is_domestic**
+
+*is_domestic* is another new variable we created. International travelers chose package deals more often. 
+
+```{r is_domestic, message = FALSE, warning= FALSE, echo=FALSE}
+pander(Book %>% group_by(is_domestic) %>% summarise(prop_package = mean(is_package)))
+```
+
+\newpage
+\section{The Model}
+
+We split our data to 70% training and 30% testing. We repeated this process four times by assigning different seeds. The purpose was to examine whether our model would yield consistent results after resampling. 
+
+We built our logistic classification model as follows. 
+
+
+```{r seed1 model1, include=FALSE}
+# Training-Testing Split
+set.seed(123)
+samp <- sample(nrow(Book), 0.7 * nrow(Book))
+train <- Book[samp, ]
+test <- Book[-samp, ]
+```
+
+```{r model1}
+# Seed 1
+g1 <- glm(factor(is_package) ~ factor(user_location_country) + orig_destination_distance 
+          + factor(is_mobile) + factor(prop_is_branded) + factor(prop_starrating) 
+          + factor(hist_price_band) + factor(popularity_band) + factor(is_ahead) 
+          + factor(is_domestic), family = binomial, data = train)
+```
+
+```{r seed1 model1 cont, include=FALSE}
+summary(g1)
+
+# Prediction
+# test.probs contains the predicted probability of Y=1 given X1 to Xk.
+test.probs <- predict(g1, test, type = "response") 
+hist(test.probs)
+# The distribution of predicted probabilities is highly right-skewed.
+# In reality, approximately 10% users chose packages in our sample.
+# If Pr(Y=1|X) > 0.1, the users will choose packages.
+# Assign 0.1 as the cut-off point.
+glm.pred <- rep(0, nrow(test))
+glm.pred[test.probs > 0.1] <- 1
+
+# Confusion Matrix 
+t1 <- table(actual = test$is_package, prediction = glm.pred)
+acc_rate1 <- paste(round(100 * sum(t1[c(1, 4)]) / sum(t1[1:4]), 2), "%", sep = "") #73.52%
+CM1 <- confusionMatrix(test$is_package, glm.pred)
+```
+
+```{r seed2 model2, include=FALSE}
+# Reset Seed
+set.seed(201)
+samp2 <- sample(nrow(Book), 0.7 * nrow(Book))
+train2 <- Book[samp2, ]
+test2 <- Book[-samp2, ]
+```
+
+```{r model2}
+# Seed 2
+g2 <- glm(factor(is_package) ~ factor(user_location_country) + orig_destination_distance 
+          + factor(is_mobile) + factor(prop_is_branded) + factor(prop_starrating) 
+          + factor(hist_price_band) + factor(popularity_band) + factor(is_ahead) 
+          + factor(is_domestic), family = binomial, data = train2)
+```
+
+```{r seed2 model2 cont, include=FALSE}
+summary(g2)
+
+# Prediction
+test.probs2 <- predict(g2, test2, type = "response") 
+hist(test.probs2)
+
+glm.pred2 <- rep(0, nrow(test2))
+glm.pred2[test.probs2 > 0.1] <- 1
+
+# Confusion Matrix 
+t2 <- table(actual =  test2$is_package, prediction = glm.pred2)
+acc_rate2 <- paste(round(100 * sum(t2[c(1, 4)]) / sum(t2[1:4]), 2), "%", sep = "") #73.75%
+CM2 <-confusionMatrix(test2$is_package, glm.pred2)
+```
+
+```{r seed3 model3, include=FALSE}
+# Reset Seed
+set.seed(100)
+samp3 <- sample(nrow(Book), 0.7 * nrow(Book))
+train3 <- Book[samp3, ]
+test3 <- Book[-samp3, ]
+```
+
+```{r model 3}
+# Seed 3
+g3 <- glm(factor(is_package) ~ factor(user_location_country) + orig_destination_distance 
+          + factor(is_mobile) +factor(prop_is_branded) + factor(prop_starrating) 
+          + factor(hist_price_band) + factor(popularity_band) + factor(is_ahead) 
+          + factor(is_domestic), family = binomial, data = train3)
+```
+
+```{r seed 3 model 3 cont, include=FALSE}
+summary(g3)
+# Prediction
+test.probs3 <- predict(g3, test3, type = "response") 
+hist(test.probs3)
+
+glm.pred3 <- rep(0, nrow(test3))
+glm.pred3[test.probs3 > 0.1] <- 1
+
+# Confusion Matrix 
+t3 <- table(actual = test3$is_package, prediction = glm.pred3)
+acc_rate3 <- paste(format(round(100 * sum(t3[c(1, 4)]) / sum(t3[1:4]), 2), nsmall = 2), "%", sep = "") #73.70%
+CM3 <- confusionMatrix(test3$is_package, glm.pred3)
+```
+
+```{r seed4 model4, include=FALSE}
+# Reset Seed
+set.seed(109)
+samp4 <- sample(nrow(Book), 0.7 * nrow(Book))
+train4 <- Book[samp4, ]
+test4 <- Book[-samp4, ]
+```
+
+```{r model 4}
+# Seed 4 
+g4 <- glm(factor(is_package) ~ factor(user_location_country) + orig_destination_distance 
+          + factor(is_mobile) + factor(prop_is_branded) + factor(prop_starrating) 
+          + factor(hist_price_band) + factor(popularity_band) + factor(is_ahead) 
+          + factor(is_domestic), family = binomial, data = train4)
+```
+
+```{r seed 4 model 4 cont, include=FALSE}
+summary(g4)
+# Prediction
+test.probs4 <- predict(g4, test4, type = "response") 
+hist(test.probs4)
+
+glm.pred4 <- rep(0, nrow(test4))
+glm.pred4[test.probs4 > 0.1] <- 1
+
+t4 <- table(actual =  test4$is_package, prediction = glm.pred4)
+acc_rate4 <- paste(format(round(100 * sum(t4[c(1, 4)]) / sum(t4[1:4]), 2), nsmall = 2), "%", sep = "") #"73.50%"
+CM4 <- confusionMatrix(test4$is_package, glm.pred4) 
+```
+
+After we built our model based on the 4 training data sets, we used the prediction function to get the probability that a user will choose a package deal based on the 4 different testing data sets. We overlaid the 4 density plots of predicted probabilities together, shown in Figure 1 on the next page. The four density plots almost perfectly overlapped with each other, meaning that the distribution of predicted probability after resampling remained the same. 
+
+The distribution is highly right skewed, consistent with our speculation because less than 10% of the bookers actually chose a package in our data. We chose probability > 0.1 as the cut-off point; an outcome with predicted probability > 0.1 would be marked as choosing a package deal.	
+
+```{r density plot, fig.show='hold', fig.align='center',  fig.width=6,fig.height=4, fig.cap="Density Plots of Predicted Probabilities from Different Samplings", message = FALSE, warning= FALSE, error=FALSE, echo=FALSE}
+# Denstiy Plots to Examine the Distributions of Predicted Probabilities
+x <- data.frame(seed1 = test.probs, seed2 = test.probs2, seed3 = test.probs3, seed4 = test.probs4)
+prob <- melt(x)
+ggplot(prob,aes(x = value, colour = variable, fill = variable)) + geom_density(alpha=0.2) + xlab("Probability that the User Will Choose a Package Deal") + ylab("Density") +  theme_minimal()
+theme_update(axis.title = element_text(size = 10))
+```
+\
+
+\section{Results}
+
+The confusion matrices resulting from the 4 seeds of resamplings are shown below. 
+
+\begin{table}[h]
+  \begin{minipage}[t]{0.5\linewidth}
+    \begin{exe}
+      \ex
+        \begin{tabular}{|c|c|c|}
+        \hline
+        & Predicted No & Predicted Yes \\ 
+        \hline
+        Actual No & TN = `r t1[1]` & FP = `r t1[3]` \\ 
+       Actual Yes & FN = `r t1[2]` & TP = `r t1[4]` \\ 
+        \hline
+        \end{tabular}
+    \end{exe}
+  \end{minipage}
+  \begin{minipage}[t]{0.5\linewidth}
+    \begin{exe}
+      \ex
+        \begin{tabular}{|c|c|c|}
+        \hline
+        & Predicted No & Predicted Yes \\ 
+        \hline
+        Actual No & TN = `r t2[1]` & FP = `r t2[3]` \\ 
+       Actual Yes & FN = `r t2[2]` & TP = `r t2[4]` \\ 
+        \hline
+        \end{tabular}
+    \end{exe}
+  \end{minipage}
+  \begin{minipage}[t]{0.5\linewidth}
+    \begin{exe}
+      \ex
+        \begin{tabular}{|c|c|c|}
+        \hline
+        & Predicted No & Predicted Yes \\ 
+        \hline
+        Actual No & TN = `r t3[1]` & FP = `r t3[3]` \\ 
+       Actual Yes & FN = `r t3[2]` & TP = `r t3[4]` \\ 
+        \hline
+        \end{tabular}
+    \end{exe}
+  \end{minipage}
+  \begin{minipage}[t]{0.5\linewidth}
+    \begin{exe}
+      \ex
+        \begin{tabular}{|c|c|c|}
+        \hline
+        & Predicted No & Predicted Yes \\ 
+        \hline
+        Actual No & TN = `r t4[1]` & FP = `r t4[3]` \\ 
+       Actual Yes & FN = `r t4[2]` & TP = `r t4[4]` \\ 
+        \hline
+        \end{tabular}
+    \end{exe}
+  \end{minipage}
+\end{table}
+    
+
+We visualized the confusion matrices, displayed in Figure 2. 
+
+```{r visual, fig.show='hold', fig.cap="Visualization of Confusion Matrices, Obtained from Four Seeds of Resamplings", fig.align="center", echo=FALSE}
+par(mfrow = c(2,2))
+fourfoldplot(CM1$table)
+fourfoldplot(CM2$table)
+fourfoldplot(CM3$table)
+fourfoldplot(CM4$table)
+par(mfrow = c(1,1))
+```
+
+
+Table 10  describes the accuracy, sensitivity, and specificity resulted from our prediction model, corresponding with the four seeds of resamplings. 
+
+```{r confusion matrices, echo=FALSE, results='asis'}
+# TN = ti[1], TP = ti[4]
+# FN = ti[2], FP = ti[3]
+
+# Actual Yes = TP + FN = sum(ti[c(2,4)])
+# Actual No = TN + FP = sum(ti[c(1,3)])
+
+# Accuracy = (TP + TN)/Total = sum(ti[c(1,4)]) / sum(ti[1:4])
+# Sensitivity = TP/Actual Yes = ti[4] / sum(ti[c(2,4)])
+# Specificity = TN/Actual No = ti[1] / sum(ti[c(1,3)])
+
+Seed1 <- list(
+    Accuracy = sum(t1[c(1,4)]) / sum(t1[1:4]),
+    Sensitivity = t1[4] / sum(t1[c(2,4)]),
+    Specificity =  t1[1] / sum(t1[c(1,3)]))
+  
+Seed2 <- list(
+    Accuracy = sum(t2[c(1,4)]) / sum(t2[1:4]),
+    Sensitivity = t2[4] / sum(t2[c(2,4)]),
+    Specificity =  t2[1] / sum(t2[c(1,3)]))
+    
+
+Seed3 <- list(
+    Accuracy = sum(t3[c(1,4)]) / sum(t3[1:4]),
+    Sensitivity = t3[4] / sum(t3[c(2,4)]),
+    Specificity =  t3[1] / sum(t3[c(1,3)]))
+   
+
+Seed4 <- list(
+    Accuracy = sum(t4[c(1,4)]) / sum(t4[1:4]),
+    Sensitivity = t4[4] / sum(t4[c(2,4)]),
+    Specificity =  t4[1] / sum(t4[c(1,3)]))
+    
+digit4 <- function(x) {
+  y <- format(round(x, 4), nsmall = 4)
+  return(y)
+}
+
+S1 <- lapply(Seed1, FUN = digit4)
+S2 <- lapply(Seed2, FUN = digit4)
+S3 <- lapply(Seed3, FUN = digit4)
+S4 <- lapply(Seed4, FUN = digit4)
+
+CM <- as.data.frame(rbind(S1, S2, S3, S4))
+rownames(CM) <- c("Seed 1", "Seed 2", "Seed 3", "Seed 4")
+pander(CM, style="rmarkdown", split.tables=Inf, keep.trailing.zeros=TRUE, caption="Model Results from Resamplings")
+```
+
+\textit{\underline{Remark:}}
+\begin{itemize}%[leftmargin=1em]
+\item TN = True Negative
+\item TP = True Positive
+\item FN = False Negative
+\item FP = False Positive
+\item Actual Yes = TP + FN
+\item Actual No = TN + FP 
+\item Accuracy = (TP + TN)/Total
+  \begin{itemize}
+  \item Overall, how often is the classifier correct?
+  \end{itemize}
+\item Sensitivity = TP/Actual Yes 
+  \begin{itemize}
+  \item When it's actually yes, how often does it predict yes?
+  \end{itemize}
+\item Specificity = TN/Actual No 
+  \begin{itemize}
+  \item When it's actually no, how often does it predict no?
+  \end{itemize}
+\end{itemize}
+
+After resampling the training and testing data sets four times, the accuracy rates corresponding to the four confusion matrices above are `r acc_rate1`, `r acc_rate2`, `r acc_rate3` and `r acc_rate4` respectively; they are very close to each other. The sensitivity and specificity rates also vary little after resampling. Therefore, our model gives stable prediction results. 
+
+```{r significant predictors, include=FALSE}
+# Picking out Significant Predictors
+G1 <- as.data.frame(summary(g1)$coefficients[,c(1,4)])
+G1 <- G1[G1$`Pr(>|z|)` < 0.05, ]
+G1$Variable <- rownames(G1)
+
+G2 <- as.data.frame(summary(g2)$coefficients[,c(1,4)])
+G2 <- G2[G2$`Pr(>|z|)` < 0.05, ]
+G2$Variable <- rownames(G2)
+
+G3 <- as.data.frame(summary(g3)$coefficients[,c(1,4)])
+G3 <- G3[G3$`Pr(>|z|)` < 0.05, ]
+G3$Variable <- rownames(G3)
+
+G4 <- as.data.frame(summary(g4)$coefficients[,c(1,4)])
+G4 <- G4[G4$`Pr(>|z|)` < 0.05, ]
+G4$Variable <- rownames(G4)
+
+G12 <- merge(G1,G2, by="Variable")
+G34 <- merge(G3, G4, by="Variable")
+
+# Mean coefficient estimates and mean p-values
+summary <- merge(G12, G34, by = "Variable")
+summary$Mean_Coef <- round(rowSums(summary[ ,c(2,4,6,8)])/4, 3)
+summary$Mean_Pvalue <- round(rowSums(summary[ ,c(3,5,7,9)])/4, 3)
+
+# Standard deviations of estimated coefficients and p-values
+summary$SD_Coef <- round(apply(summary[ ,c(2,4,6,8)], 1, sd), 3)
+summary$SD_Pvalue <- round(apply(summary[ ,c(3,5,7,9)], 1, sd), 3)
+```	
+
+\section{Conclusion}
+
+Table 11 describes the significant predictors remained in our model after resampling. The standard deviations for coefficient estimates and p-values obtained from different samplings are all very small, suggesting that we get similar coefficient estimates after resampling. 
+
+We also calculated the average slope coefficients, which helped us answer our research question:
+
+Expedia bookers’ choices of package deals are influenced by historical purchase price of the hotel, popularity of the hotel, star rating of the hotel, travel distance of the booker, country of origin of the booker, whether the booker plans ahead about the travel, whether the booker travels internationally or domestically, and whether the user books with mobile devices.
+
+\newpage
+
+```{r sig table, echo=FALSE}	
+pander(summary[ , c(1, 10:13)], caption = "Summary of Coefficient Estimates", split.table = Inf)
+```
+
+Based on the results of the logsitic model, we conclude that
+
+\begin{itemize}%[leftmargin=1em]
+\item {If the bookers come from Germany, Switzerland, Canada, Georgia, and the United States, the log odds of choosing package deals will increase significantly.}
+\item {If the bookers travel Internationally, the log odds of choosing package deals will increase significantly.}
+\item {If the bookers choose hotels with higher star-ratings and more popularity, the log odds of choosing package deals will increase significantly.}
+\item {People who plan ahead about their travels and people who book on the Expedia mobile app are discouraged to choose package deals.} 	
+\end{itemize}
+
+Based on the above results, we came up with some suggestions for the company to attract more customers and generate financial benefits, and we used the early bird characteristic group as examples to demonstrate the improvements.
+
+\begin{enumerate}[itemsep=0pt, topsep=0pt]
+\item{The company should improve users' experience by easing the process of searching.}
+\begin{itemize}[itemsep=0pt, topsep=0pt]
+\item{We’ve noticed that the early birds tend to customized details of their trips while the procrastinators, the impulsive ones, who start doing their research on their way to the airport prefers the one-click package option.}
+\item{Therefore, the company can change the presenting order of the search results accordingly. For example, list packages deals on top of the page for the last-minute bookers and design a more  user-friendly interface.}
+\end{itemize}
+\item{The company can design different package options for different user groups.}
+\begin{itemize}[itemsep=0pt, topsep=0pt]
+\item{Specifically, design more flexibility for the early birds and more comprehensive combinations for international travellers, who may wish to have scenic spot tickets included in their packages.}
+\end{itemize}
+\item{The company can implement price discrimination based on users’ planning behaviors.}
+\begin{itemize}[itemsep=0pt, topsep=0pt]
+\item{Referring back to the numerous advantages of big data, we suggest Expedia to get a better understanding of customer preference and behaviors by taking a closer look at certain characteristic groups.}
+\item{Price discrimination based on booker's planning behaviors is one of the applications of our classification model in this research project.}
+\item{So for the travelers, plan early to save the money.}
+\end{itemize}
+\end{enumerate}
+
+\section{Teamwork Summary}
+
+In picking predictors to include in our model, each member in our group was responsible for examining the relationship between *is_package* and all other variables. After that, Xiaojing started with the random forest method and ended up with odd result - the model predicted non-package for every response. Then Haorui, Yufei, Chen and Xinyan each tried some subsets of the data but the result was still not promising. Professor Lew advised that the strange result might come from the unbalanced proportions of 0s and 1s in the variable *is_package*. Therefore, Chen and Xinyan still focused on random forest method, but this time with a sample from the original data where there are equal amount of 0s and 1s in the variable *is_package*. At the same time, Haorui and Xiaojing moved to logistic regression method. The result from both methods appear reliable this time, and we ultimately chose logistic regression. In the next few days, all members in our group further improved our current model, integrated our ideas for the final presentation and report. 
+

@@ -1,0 +1,703 @@
+---
+title: "Quantify Relationship between Brain Patterns and Symptoms of Schizophrenia "
+subtitle: "UCLA Stats 141SL Project Codes"
+author: "Xiaojing Zhu, Haorui Zhang, Chen Wen, Xinyan Li, Yufei Den"
+date: "3/20/2018"
+output: pdf_document
+---
+
+```{r message = FALSE}
+library(car)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(stringr)
+library(data.table)
+library(randomForestSRC)
+```
+
+# 1. Data Cleaning
+
+```{r warning = FALSE}
+# Load the data
+COBRE_between_nets <- read.csv("~/Desktop/Group9/COBRE_between_nets.txt", sep="")
+COBRE_within_nets <- read.csv("~/Desktop/Group9/COBRE_within_nets.txt", sep="")
+CNP_between_nets <- read.csv("~/Desktop/Group9/CNP_between_nets.txt", sep="")
+CNP_within_nets <- read.csv("~/Desktop/Group9/CNP_within_nets.txt", sep="")
+CNP_SANS_SAPS_BPRS <- read_excel("~/Desktop/Group9/CNP_SANS_SAPS_BPRS.xls", sheet = "Sheet1")
+PANSS <- read_excel("~/Desktop/Group9/COBRE INDI Additional data.xls", sheet = "PANSS")
+```
+
+## 1.1 Data Preparation for COBRE
+```{r}
+# Merge the three data sets from the COBRE study
+# Extract ID
+COBRE_within_nets$Subject_ID <- as.character(COBRE_within_nets$Subject_ID)
+COBRE_between_nets$Subject_ID <- as.character(COBRE_between_nets$Subject_ID)
+
+numextract <- function(string){ 
+  str_extract(string, "\\d+\\.*\\d*")
+} 
+
+COBRE_within_nets$ID <- as.character(numextract(COBRE_within_nets$Subject_ID))
+COBRE_between_nets$ID <- as.character(numextract(COBRE_between_nets$Subject_ID))
+
+# Create a new data COBRE after merging between nets, within nets, and PANSS by ID
+COBRE <- merge(COBRE_within_nets,PANSS, by = "ID")
+COBRE <- merge(COBRE_between_nets, COBRE, by = "ID")
+```
+
+```{r}
+# Sum up 5 dimensions of PANSS
+COBRE$Uncooperativeness <- as.numeric(COBRE$Uncooperativeness) # one "MD" (missing data) is coerced to NA
+
+COBRE$Negative <- COBRE$`Blunted Affect` + COBRE$`Emotional Withdrawal` + COBRE$`Poor Rapport` + COBRE$`Passive/Apathetic Social Withdrawal` + COBRE$`Lack of Spontaneity and Flow of Conversation` + COBRE$`Motor Retardation` + COBRE$`Active Social Avoidance` + COBRE$`Disturbance of Volition`
+
+COBRE$Positive<- COBRE$Delusions + COBRE$`Hallucinatory Behavior` + COBRE$Grandiosity + COBRE$`Suspiciousness/Persecution` + COBRE$`Stereotyped Thinking` + COBRE$`Somatic Concern`+COBRE$`Unusual Thought Content`+ COBRE$Preoccupation
+
+COBRE$Disorganized <- COBRE$`Stereotyped Thinking` + COBRE$`Lack of Judgment and Insight` + COBRE$`Conceptual Disorganization` + COBRE$`Difficulty in Abstract Thinking` + COBRE$`Mannerisms and Posturing` + COBRE$`Poor Attention` + COBRE$`Disturbance of Volition` + COBRE$Preoccupation + COBRE$Disorientation
+
+COBRE$Excited <- COBRE$Excitement + COBRE$Hostility + as.numeric(COBRE$Uncooperativeness) + COBRE$`Poor Impulse Control`
+
+COBRE$Anxiety <- COBRE$Anxiety + COBRE$`Guilt Feelings` + COBRE$Tension+COBRE$Depression + COBRE$`Somatic Concern`
+```
+
+```{r}
+sum(is.na(COBRE))
+COBRE <- na.omit(COBRE)
+COBRE <- COBRE[, -c(2, 97:100, 171:186, 188:201)]
+
+# Subset COBRE to explore between and within measurements
+COBRE_between <- COBRE[ ,c(5:95, 166:170)]
+COBRE_within <- COBRE[ ,c(96:170)]
+
+# Export clean COBRE data
+write.csv(COBRE, file = "~/Desktop/Group9/COBRE.csv")
+```
+
+```{r}
+# Clean the CORBRE Medication Data
+# Import the medication data set from the COBRE study
+Med <- read_excel("~/Desktop/Group9/COBRE INDI Additional data.xls", sheet = "COBRE INDI Medication Log")
+Med <- Med[ , -1]
+
+# Transpose the data
+Med <- t(Med)
+colnames(Med) <- Med[1, ]
+
+# Subset medications
+Med <- Med[ , c(1, 11, 20, 30, 40)]
+Med <- data.frame(Med[-1, ])
+
+# Create a new column ID from the rownames
+Med <- setDT(Med, keep.rownames = TRUE)[]
+ID_label <- na.omit(melt(Med, id="rn"))
+ID_label <- ID_label[ , -2]
+colnames(ID_label) <- c("ID","Label")
+ID_label$ID <- as.integer(ID_label$ID)
+
+# Import names of medication
+name <- read_excel("~/Desktop/Group9/COBRE INDI Additional data.xls", sheet = "Med. Codes")
+colnames(name) <- c("Label", "name")
+
+# Now we have patient ID ane the name of medication s/he takes
+ID_name <- merge(name, ID_label, by = "Label")
+```
+
+```{r}
+# We research on whether the medication is a 1st generation or 2nd geneartion antipsychotic drugs, and create a new excel file containing this information
+COBRE_Med <- read_excel("~/Desktop/Group9/Question 2.xlsx", sheet = "Q2")
+COBRE$ID <- as.integer(COBRE$ID)
+COBRE_Med <- merge(COBRE_Med, COBRE, by = "ID")
+COBRE_Med <- COBRE_Med[ ,c(1:3, 98:111, 168:172)]
+
+# Creating a new variable "Medication", which contains information about whether the patient takes 1st generation medication (1.0), 2nd generation medication (0.1), or both (1.1)
+COBRE_Med$Medication <- with(COBRE_Med, interaction(`Generation 1`,  `Generation 2`))
+levels(COBRE_Med$Medication)
+
+# Remove (0.0)
+COBRE_Med$Medication <- factor(COBRE_Med$Medication)
+levels(COBRE_Med$Medication)
+
+write.csv(COBRE_Med, file = "~/Desktop/Group9/COBRE_Med.csv")
+```
+
+
+## 1.2 Data Preparation for CNP
+
+```{r}
+# Merging the three data sets from the CNP study
+# Extract ID
+CNP_within_nets$Subject_ID <- as.character(CNP_within_nets$Subject_ID)
+CNP_between_nets$Subject_ID <- as.character(CNP_between_nets$Subject_ID)
+
+numextract <- function(string){ 
+  str_extract(string, "\\d+\\.*\\d*")
+} 
+
+CNP_within_nets$PTID <- as.character(numextract(CNP_within_nets$Subject_ID))
+CNP_between_nets$PTID <- as.character(numextract(CNP_between_nets$Subject_ID))
+
+# Create a new data CNP after merging between nets, within nets, and SANS/SAPS by ID
+CNP <- merge(CNP_within_nets,CNP_SANS_SAPS_BPRS, by = "PTID")
+CNP <- merge(CNP_between_nets, CNP, by = "PTID")
+
+# Filter out schizophrenia patients only
+CNP <- filter(CNP, Subject_Type.x == "Schizophrenia")
+```
+
+```{r}
+# Convert SANS/SAPS to numeric
+num <- c(173:196, 209:243)
+for(i in num) {
+  CNP[ ,i] <- as.numeric(CNP[ ,i])
+}
+```
+
+```{r}
+# Remove unuseful columns
+CNP <- CNP[ , - c(171, 172, 197:208, 244:294)]
+
+# Create new variables containing sum of SANS and SAPS scores
+CNP$SANS_sum <- rowSums(CNP[ ,171:194])
+CNP$SAPS_sum <- rowSums(CNP[ ,195:229])
+```
+
+```{r}
+sum(is.na(CNP))
+CNP <- CNP[, -c(2, 97:100, 171:229)]
+
+# Subset CNP to explore between and within measurements
+CNP_between <- CNP[ ,c(5:95, 166:167)]
+CNP_within <- CNP[ ,c(96:165, 166:167)]
+
+# Export clean CNP data
+write.csv(CNP, file = "~/Desktop/Group9/CNP.csv")
+```
+
+# 2. Data Exploration
+
+## 2.1.1 Data Exploration for COBRE
+
+```{r}
+# COBRE study has 91 predictors between networks, 70 predictors within networks, and 69 observations
+dim(COBRE) 
+# Outcome variable is 5-dimensional
+summary(COBRE$Negative)
+summary(COBRE$Positive)
+summary(COBRE$Disorganized)
+summary(COBRE$Excited)
+summary(COBRE$Anxiety)
+```
+
+```{r  echo=FALSE}
+# Histograms for the 5 dimensions of PANSS
+barfill <- "#4271AE"
+barlines <- "#1F3552"
+
+ggplot(COBRE, aes(x = Negative)) +
+        geom_histogram(aes(y = ..count..), binwidth = 1,
+                       colour = barlines, fill = barfill) +
+        scale_x_continuous(name = "Negative Symptons of PANSS",
+                           breaks = seq(0, 35, 1),
+                           limits=c(0, 35)) +
+        scale_y_continuous(name = "Count", breaks = seq(0, 10, 1), limits = c(0, 10)) +
+        ggtitle("Histogram of Negative Symptons of PANSS") +
+        theme_bw() +
+        theme(axis.line = element_line(size = 1, colour = "black"),
+              panel.grid.major = element_line(colour = "#d3d3d3"),
+              panel.grid.minor = element_blank(),
+              panel.border = element_blank(), panel.background = element_blank(),
+              plot.title = element_text(size = 14, face = "bold"),
+              axis.text.x=element_text(colour="black", size = 7),
+              axis.text.y=element_text(colour="black", size = 9))
+
+
+ggplot(COBRE, aes(x = Positive)) +
+        geom_histogram(aes(y = ..count..), binwidth = 1,
+                       colour = barlines, fill = barfill) +
+        scale_x_continuous(name = "Positive Symptons of PANSS",
+                           breaks = seq(0, 40, 1),
+                           limits=c(0, 40)) +
+        scale_y_continuous(name = "Count", breaks = seq(0, 10, 1), limits = c(0, 10)) +
+        ggtitle("Histogram of Positive Symptons of PANSS") +
+        theme_bw() +
+        theme(axis.line = element_line(size=1, colour = "black"),
+              panel.grid.major = element_line(colour = "#d3d3d3"),
+              panel.grid.minor = element_blank(),
+              panel.border = element_blank(), panel.background = element_blank(),
+              plot.title = element_text(size = 14, face = "bold"),
+              axis.text.x=element_text(colour="black", size = 7),
+              axis.text.y=element_text(colour="black", size = 9))
+
+
+ggplot(COBRE, aes(x = Disorganized)) +
+        geom_histogram(aes(y = ..count..), binwidth = 1,
+                       colour = barlines, fill = barfill) +
+        scale_x_continuous(name = "Disorganized Symptons of PANSS",
+                           breaks = seq(0, 30, 1),
+                           limits=c(0, 30)) +
+        scale_y_continuous(name = "Count", breaks = seq(0, 10, 1), limits = c(0, 10)) + 
+        ggtitle("Histogram of Disorganized Symptons of PANSS") +
+        theme_bw() +
+        theme(axis.line = element_line(size=1, colour = "black"),
+              panel.grid.major = element_line(colour = "#d3d3d3"),
+              panel.grid.minor = element_blank(),
+              panel.border = element_blank(), panel.background = element_blank(),
+              plot.title = element_text(size = 14, face = "bold"),
+              axis.text.x=element_text(colour="black", size = 7),
+              axis.text.y=element_text(colour="black", size = 9))
+
+
+ggplot(COBRE, aes(x = Excited)) +
+        geom_histogram(aes(y = ..count..), binwidth = 1,
+                       colour = barlines, fill = barfill) +
+        scale_x_continuous(name = "Excited Symptons of PANSS",
+                           breaks = seq(0, 20, 1),
+                           limits=c(0, 20)) +
+        scale_y_continuous(name = "Count", breaks = seq(0, 40, 5), limits = c(0, 40))+
+        ggtitle("Histogram of Excited Symptons of PANSS") +
+        theme_bw() +
+        theme(axis.line = element_line(size=1, colour = "black"),
+              panel.grid.major = element_line(colour = "#d3d3d3"),
+              panel.grid.minor = element_blank(),
+              panel.border = element_blank(), panel.background = element_blank(),
+            plot.title = element_text(size = 14, face = "bold"),
+              axis.text.x=element_text(colour="black", size = 7),
+              axis.text.y=element_text(colour="black", size = 9))
+
+
+ggplot(COBRE, aes(x = Anxiety)) +
+        geom_histogram(aes(y = ..count..), binwidth = 1,
+                       colour = barlines, fill = barfill) +
+        scale_x_continuous(name = "Anxiety Symptons of PANSS",
+                           breaks = seq(0, 50, 1),
+                           limits=c(0, 50)) +
+        scale_y_continuous(name = "Count", breaks = seq(0, 10, 1), limits = c(0, 10)) + 
+        ggtitle("Histogram of Anxiety Symptons of PANSS") +
+        theme_bw() +
+        theme(axis.line = element_line(size=1, colour = "black"),
+              panel.grid.major = element_line(colour = "#d3d3d3"),
+              panel.grid.minor = element_blank(),
+              panel.border = element_blank(), panel.background = element_blank(),
+              plot.title = element_text(size = 14, face = "bold"),
+              axis.text.x=element_text(colour="black", size = 5),
+              axis.text.y=element_text(colour="black", size = 9))
+```
+
+```{r}
+# COBRE Preditors only
+COBRE_between_p <- COBRE[ ,c(5:95)]
+COBRE_within_p <- COBRE[ ,c(96:165)]
+
+min(COBRE_between_p)
+max(COBRE_between_p)
+
+min(COBRE_within_p)
+max(COBRE_within_p) #outlier
+
+which.max(apply(COBRE_within_p, MARGIN=2, max)) # Memory_retrieval.char_path_length, not included in the model
+max(COBRE_within_p[COBRE_within_p != max(COBRE_within_p)]) #6.69197
+which(COBRE_within_p == 6.69197)
+colnames(COBRE_within_p)[which(COBRE_within_p == 6.69197, arr.ind = TRUE)[2]] #"Uncertain.char_path_length", not included
+```
+
+```{r}
+# cor(COBRE_between) shows large (>0.4) correlation coefficients
+# cor(COBRE_within) shows large (>0.4) correlation coefficients
+
+# Correlation between the brain pattern measurements (the predictors) and the 5 dimensions of PANSS
+
+# COBRE measures vs. Negative Symptoms in PANSS
+BN <- round(cor(COBRE_between_p, COBRE$Negative), 3)
+WN <- round(cor(COBRE_within_p, COBRE$Negative), 3)
+
+# COBRE measures vs. Positive Symptoms in PANSS
+BP <- round(cor(COBRE_between_p, COBRE$Positive), 3)
+WP <- round(cor(COBRE_within_p, COBRE$Positive), 3)
+
+# COBRE measures vs. Disorganized Symptoms in PANSS
+BD <- round(cor(COBRE_between_p, COBRE$Disorganized), 3)
+WD <- round(cor(COBRE_within_p, COBRE$Disorganized), 3)
+
+# COBRE measures vs. Excited Symptoms in PANSS
+BE <- round(cor(COBRE_between_p, COBRE$Excited), 3)
+WE <- round(cor(COBRE_within_p, COBRE$Excited), 3)
+
+# COBRE measures vs. Anxiety Symptoms in PANSS
+BA <- round(cor(COBRE_between_p, COBRE$Anxiety), 3)
+WA <- round(cor(COBRE_within_p, COBRE$Anxiety), 3)
+```
+
+```{r}
+summary(BN)
+summary(BP)
+summary(BD)
+summary(BE)
+summary(BA)
+
+mean(abs(BN))
+mean(abs(BP))
+mean(abs(BD))
+mean(abs(BE))
+mean(abs(BA))
+
+summary(WN)
+summary(WP)
+summary(WD)
+summary(WE)
+summary(WA)
+
+mean(abs(WN))
+mean(abs(WP))
+mean(abs(WD))
+mean(abs(WE))
+mean(abs(WA))
+```
+
+
+## 2.1.2 Data Exploration for COBRE_Med
+```{r}
+# dim
+dim(COBRE_Med)
+
+# Max and Min of 14 Small World fMRI measurements
+min(COBRE_Med[ ,4:17])
+max(COBRE_Med[ ,4:17])
+
+colMeans(COBRE_Med[ ,4:17])
+
+# Table of Medication Types
+table(COBRE_Med$Medication)
+```
+
+
+## 2.2 Data Exploration for CNP
+
+```{r}
+# CNP study has 91 predictors between networks, 70 predictors within networks, and 42 observations
+dim(CNP)
+# Outcome variable is 2-dimensional
+summary(CNP$SANS_sum)
+summary(CNP$SAPS_sum)
+```
+
+
+```{r echo=FALSE}
+# Histograms to visualize the distribution of "SANS_sum" and "SAPS"
+barfill <- "#8f86ef"
+barlines <- "#1F3552"
+
+ggplot(CNP, aes(x = SANS_sum)) +
+        geom_histogram(aes(y = ..count..), binwidth = 1,
+                       colour = barlines, fill = barfill) +
+        scale_x_continuous(name = "Sum of SANS Scores",
+                           breaks = seq(0, 30, 1),
+                           limits=c(0, 30)) +
+        scale_y_continuous(name = "Count", breaks = seq(0, 7, 1), limits = c(0, 7)) +
+        ggtitle("Histogram of SANS Scores") +
+        theme_bw() +
+        theme(axis.line = element_line(size=1, colour = "black"),
+              panel.grid.major = element_line(colour = "#d3d3d3"),
+              panel.grid.minor = element_blank(),
+              panel.border = element_blank(), panel.background = element_blank(),
+              plot.title = element_text(size = 14, face = "bold"),
+              axis.text.x=element_text(colour="black", size = 7),
+              axis.text.y=element_text(colour="black", size = 9))
+
+ggplot(CNP, aes(x = SAPS_sum)) +
+        geom_histogram(aes(y = ..count..), binwidth = 1,
+                       colour = barlines, fill = barfill) +
+        scale_x_continuous(name = "Sum of SAPS Scores",
+                           breaks = seq(0, 30, 1),
+                           limits=c(0, 30)) +
+        scale_y_continuous(name = "Count", breaks = seq(0, 7, 1), limits = c(0, 7)) +
+        ggtitle("Histogram of SAPS Scores") +
+        theme_bw() +
+        theme(axis.line = element_line(size=1, colour = "black"),
+              panel.grid.major = element_line(colour = "#d3d3d3"),
+              panel.grid.minor = element_blank(),
+              panel.border = element_blank(), panel.background = element_blank(),
+             plot.title = element_text(size = 14, face = "bold"),
+              axis.text.x=element_text(colour="black", size = 7),
+              axis.text.y=element_text(colour="black", size = 9))
+```
+
+```{r}
+# CNP Preditors only
+CNP_between_p <- CNP[ ,c(5:95)]
+CNP_within_p <- CNP[ ,c(96:165)]
+
+min(CNP_between_p)
+max(CNP_between_p)
+
+min(CNP_within_p)
+max(CNP_within_p)
+
+which.max(apply(CNP_within_p, MARGIN=2, max)) #Cerebellar.char_path_length
+```
+
+```{r}
+#CNP measures vs. SANS
+# cor(CNP_between) shows large (>0.4) correlation coefficients
+# cor(CNP_within) shows large (>0.4) correlation coefficients
+
+# Correlation between the brain pattern measurements (the predictors) and the SANS_sum and SAPS_sum (the outcomes)
+BSANS <- round(cor(CNP_between_p, CNP$SANS_sum), 3)
+WSANS <- round(cor(CNP_within_p, CNP$SANS_sum), 3)
+
+#CNP measures vs. SAPS
+BSAPS <- round(cor(CNP_between_p, CNP$SAPS_sum), 3)
+WSAPS <- round(cor(CNP_within_p, CNP$SAPS_sum), 3)
+```
+
+```{r}
+summary(BSANS)
+summary(BSAPS)
+summary(WSANS)
+summary(WSAPS)
+
+mean(abs(BSANS))
+mean(abs(BSAPS))
+mean(abs(WSANS))
+mean(abs(WSAPS))
+```
+
+
+# 3. Models
+
+## 3.1 Question 1: *Are brain patterns related to symptoms? Do fMRI patterns map to the PANSS symptoms in COBRE, and SANS/SAPS in CNP?*
+
+### 3.1.1 Random Forest Feature Selection
+
+```{r}
+COBRE_B <- rfsrc(Multivar(Negative, Positive, Disorganized, Excited, Anxiety) ~., data = COBRE_between, importance = TRUE)
+var.select(COBRE_B, method = "vh.vimp")
+```
+
+```{r}
+COBRE_W <- rfsrc(Multivar(Negative, Positive, Disorganized, Excited, Anxiety) ~., data = COBRE_within, importance = TRUE)
+var.select(COBRE_W, method = "vh.vimp")
+```
+
+```{r}
+CNP_B <- rfsrc(Multivar(SANS_sum, SAPS_sum) ~., data = CNP_between, importance = TRUE)
+var.select(CNP_B, method = "vh.vimp")
+```
+
+```{r}
+CNP_W <- rfsrc(Multivar(SANS_sum, SAPS_sum) ~., data = CNP_within, importance = TRUE)
+var.select(CNP_W, method = "vh.vimp")
+```
+
+### 3.1.2 Multivariate Models
+```{r}
+# COBRE Multivariate Model
+COBRE_m1 <- lm(cbind(Negative, Positive, Disorganized, Excited, Anxiety) ~ Sensory.Hand..Fronto.parietal + Visual.Auditory + Visual.Sensory.Hand. + Salience.Dorsal_Attention + Sensory.Mouth..Fronto.parietal + Sensory.Mouth..Auditory + Salience.Auditory + Sensory.Hand..Dorsal_Attention + Sensory.Mouth..Dorsal_Attention + Visual.Dorsal_Attention + Sensory.somatomotor_Hand.small_world + Sensory.somatomotor_Hand.char_path_length + Dorsal_attention.clust_coef + Cingulo.opercular_Task_Control.global_eff, data = COBRE)
+
+summary(COBRE_m1)
+Manova(COBRE_m1)
+```
+
+```{r}
+# CNP Multivariate Model
+CNP_m1 <- lm(cbind(SANS_sum,SAPS_sum) ~ Sensory.Hand..Default_Mode + Default_Mode.Auditory + Fronto.parietal.Cerebellar + Visual.Cerebellar + Uncertain.Default_Mode + Salience.Cerebellar + Default_Mode.Cerebellar+ Dorsal_attention.small_world + Sensory.somatomotor_Hand.small_world + Sensory.somatomotor_Hand.global_eff+ Auditory.mod, data = CNP)
+
+summary(CNP_m1)
+Manova(CNP_m1)
+```
+
+### 3.1.3 Cross Study Prediction
+```{r}
+# Scale the COBRE and CNP data so that we can perform cross study validation 
+COBRE_scale <- COBRE
+COBRE_scale$Negative <- scale(COBRE_scale$Negative)
+COBRE_scale$Positive <- scale(COBRE_scale$Positive)
+COBRE_scale$Disorganized <- scale(COBRE_scale$Disorganized)
+COBRE_scale$Excited <- scale(COBRE_scale$Excited)
+COBRE_scale$Anxiety <- scale(COBRE_scale$Anxiety)
+
+# all means = 0
+colMeans(COBRE_scale$Negative) 
+colMeans(COBRE_scale$Positive)
+colMeans(COBRE_scale$Disorganized)
+colMeans(COBRE_scale$Excited)
+colMeans(COBRE_scale$Anxiety)
+
+# all sd = 1
+apply(COBRE_scale$Negative, 2, sd) 
+apply(COBRE_scale$Positive, 2, sd)
+apply(COBRE_scale$Disorganized, 2, sd)
+apply(COBRE_scale$Excited, 2, sd)
+apply(COBRE_scale$Anxiety, 2, sd)
+
+CNP_scale <- CNP
+CNP_scale$SANS_sum <- scale(CNP_scale$SANS_sum)
+CNP_scale$SAPS_sum <- scale(CNP_scale$SAPS_sum)
+
+# all means = 0
+colMeans(CNP_scale$SANS_sum) 
+colMeans(CNP_scale$SAPS_sum)
+
+ # all sd = 1
+apply(CNP_scale$SANS_sum, 2, sd)  
+apply(CNP_scale$SAPS_sum, 2, sd)
+```
+
+```{r}
+# This is our best model based on the COBRE data (using the scaled data)
+COBRE_s <- lm(formula = cbind(Negative, Positive, Disorganized, Excited, Anxiety) ~ Sensory.Hand..Fronto.parietal + Visual.Auditory + Visual.Sensory.Hand. + Salience.Dorsal_Attention + Sensory.Mouth..Fronto.parietal + Sensory.Mouth..Auditory + Salience.Auditory + Sensory.Hand..Dorsal_Attention + Sensory.Mouth..Dorsal_Attention + Visual.Dorsal_Attention + Sensory.somatomotor_Hand.small_world + Sensory.somatomotor_Hand.char_path_length + Dorsal_attention.clust_coef + Cingulo.opercular_Task_Control.global_eff, data = COBRE_scale)
+
+summary(COBRE_s)
+```
+
+```{r}
+# Cross Study Validation
+# Using the COBRE model to predicting SANS (positive syndromes) and SAPS (negative syndromes) based on CNP testing data
+CNP_test <- CNP[ ,c(5:165)]
+cross_pred <- as.data.frame(predict(COBRE_s, data.frame(CNP_test)))
+colnames(cross_pred) <- c("Negative", "Positive", "Disorganized", "Excited", "Anxiety")
+
+# Negative syndromes
+SSR_n <- sum((cross_pred$Negative - mean(CNP_scale$SANS_sum))^2)
+SST_n <- sum((CNP_scale$SANS_sum - mean(CNP_scale$SANS_sum))^2)
+SSR_n/SST_n # Gives us an R-square of 0.4007224
+
+# Positive syndromes
+SSR_p <- sum((cross_pred$Positive - mean(CNP_scale$SAPS_sum))^2)
+SST_p <- sum((CNP_scale$SAPS_sum - mean(CNP_scale$SAPS_sum))^2)
+SSR_p/SST_p # Gives us an R-square of 0.5442006
+```
+
+## 3.2 Question 2: *Are symptoms and brain markers associated with medications (in the COBRE study)?*
+
+Perhaps a better model would be to see whether there is an interaction between fMRI and medication in predicting symptoms:
+PANSS_POSITIVE = (fMRI Measures) * Medications (as factors A, B, AB)
+Perhaps just use the within nets measures- small world to reduce the variables.
+
+
+```{r}
+# Q2 <- lm(cbind(Negative, Positive, Disorganized, Excited, Anxiety) ~ Medication * Auditory.small_world + Medication * Cerebellar.small_world + Medication * Cingulo.opercular_Task_Control.small_world + Medication * Default_mode.small_world + Medication * Dorsal_attention.small_world + Medication * Fronto.parietal_Task_Control.small_world + Medication *  Memory_retrieval.small_world + Medication * Salience.small_world + Medication * Sensory.somatomotor_Hand.small_world + Medication * Sensory.somatomotor_Mouth.small_world + Medication * Subcortical.small_world + Medication * Uncertain.small_world + Medication * Ventral_attention.small_world + Medication * Visual.small_world , data = COBRE_Med)
+# summary(Q2)
+# alias(Q2)
+```
+
+```{r}
+# Drop (1.0) (3 observations that has high collinearity)
+COBRE_Med_model <- COBRE_Med[COBRE_Med$Medication != "1.0", ]
+
+# Multivariate Model for Question 2
+Q2_m <- lm(cbind(Negative, Positive, Disorganized, Excited, Anxiety) ~ Medication * Auditory.small_world + Medication * Cerebellar.small_world + Medication * Cingulo.opercular_Task_Control.small_world + Medication * Default_mode.small_world + Medication * Dorsal_attention.small_world + Medication * Fronto.parietal_Task_Control.small_world + Medication *  Memory_retrieval.small_world + Medication * Salience.small_world + Medication * Sensory.somatomotor_Hand.small_world + Medication * Sensory.somatomotor_Mouth.small_world + Medication * Subcortical.small_world + Medication * Uncertain.small_world + Medication * Ventral_attention.small_world + Medication * Visual.small_world , data = COBRE_Med_model)
+
+summary(Q2_m)
+
+Manova(Q2_m)
+```
+
+```{r}
+# Interaction plots for significant interaction effects
+# Negative PANSS: None of the interactions between fMRI and medication type is significant
+
+# Positive PANSS
+COBRE_Med %>%
+ggplot() +
+  aes(x = Auditory.small_world, color = Medication, group = Medication, y = Positive) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Positive PANSS") +
+  xlab("Auditory Small World (fMRI)") + ylab("Positive PANSS")
+
+COBRE_Med %>%
+ggplot() +
+  aes(x = Fronto.parietal_Task_Control.small_world, color = Medication, group = Medication, y = Positive) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Positive PANSS") +
+  xlab("Fronto Parietal Task Control World (fMRI)") + ylab("Positive PANSS")
+
+COBRE_Med %>%
+ggplot() +
+  aes(x = Memory_retrieval.small_world, color = Medication, group = Medication, y = Positive) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Positive PANSS") +
+  xlab("Memory Retrieval Small World (fMRI)") + ylab("Positive PANSS")
+
+COBRE_Med %>%
+ggplot() +
+  aes(x = Salience.small_world, color = Medication, group = Medication, y = Positive) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Positive PANSS") +
+  xlab("Salience Small World (fMRI)") + ylab("Positive PANSS")
+```
+
+```{r}
+# Interaction plots for significant interaction effects
+# Disorganized PANSS
+COBRE_Med %>%
+ggplot() +
+  aes(x = Auditory.small_world, color = Medication, group = Medication, y = Disorganized) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Disorganized PANSS") +
+  xlab("Auditory Small World (fMRI)") + ylab("suDisorganized PANSS")
+```
+
+```{r}
+# Interaction plots for significant interaction effects
+# Excited PANSS
+COBRE_Med %>%
+ggplot() +
+  aes(x = Salience.small_world, color = Medication, group = Medication, y = Excited) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Excited PANSS") +
+  xlab("Salience Small World (fMRI)") + ylab("Excited PANSS")
+```
+
+```{r}
+# Interaction plots for significant interaction effects
+# Anxiety PANSS
+COBRE_Med %>%
+ggplot() +
+  aes(x = Auditory.small_world, color = Medication, group = Medication, y = Anxiety) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Anxiety PANSS") +
+  xlab("Auditory Small World (fMRI)") + ylab("Anxiety PANSS")
+
+COBRE_Med %>%
+ggplot() +
+  aes(x = Fronto.parietal_Task_Control.small_world, color = Medication, group = Medication, y = Anxiety) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Anxiety PANSS") +
+  xlab("Fronto Parietal Task Control World (fMRI)") + ylab("Anxiety PANSS")
+
+COBRE_Med %>%
+ggplot() +
+  aes(x = Salience.small_world, color = Medication, group = Medication, y = Anxiety) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Anxiety PANSS") +
+  xlab("Salience Small World (fMRI)") + ylab("Anxiety PANSS")
+
+COBRE_Med %>%
+ggplot() +
+  aes(x = Uncertain.small_world, color = Medication, group = Medication, y = Anxiety) +
+  stat_summary(fun.y = mean, geom = "point") +
+  stat_summary(fun.y = mean, geom = "line")  + 
+  theme_bw() + scale_color_manual(values=c("#ffcc66", "#4da6ff", "#ff6699")) + 
+  ggtitle("Significant Interaction Between Medication Type and fMRI for Anxiety PANSS") +
+  xlab("Uncertainty Small World (fMRI)") + ylab("Anxiety PANSS")
+```
